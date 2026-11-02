@@ -79,6 +79,8 @@
     user: null, ready: false, loaded: false, failed: '',
     rows: [],          // tasks, as the app uses them
     edit: null,        // the task open in the sheet: { id (null for a new one), title, date, time, mins, tag, notes }
+    ask: null,         // the task waiting on "Mark this task done?"
+
     confirmDel: false, // the sheet is asking "Delete this task?"
     day: today(),      // the day the list was drawn for; when it changes the list is redrawn
   };
@@ -211,33 +213,45 @@
     x: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>',
   };
 
-  // one task: check circle, name, and a line saying when (the day too, in Overdue and Upcoming), how long, and its tag
+  const ICON2 = {
+    more: '<svg viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="18.5" cy="12" r="1.7"/></svg>',
+  };
+  const lenShort = n => (n < 60 ? `${n}m` : n % 60 ? `${Math.floor(n / 60)}h ${n % 60}m` : `${n / 60}h`);
+  const shortDay = k => {
+    const n = Math.round((parse(k) - parse(today())) / 864e5);
+    if (n === -1) return 'Yesterday';
+    if (n > 1 && n < 7) return fmt(parse(k), { weekday: 'short' });
+    return fmt(parse(k), { month: 'short', day: 'numeric' });
+  };
+
+  // one task, in columns: check | task (tap to rename) | time (tap to set) | length | ⋯ (everything else)
+  // In Overdue and Upcoming the time column is "When": the day, and the time under it if there is one.
   function row(t, sec) {
-    const bits = [];
-    if ((sec === 'overdue' || sec === 'upcoming') && t.date) bits.push(`<span class="${sec === 'overdue' ? 'late' : 'when'}">${esc(dayName(t.date))}</span>`);
-    if (t.time) {
-      const s0 = toMin(t.time), passed = sec === 'today' && !t.done && s0 + (t.mins || 0) <= nowMin();
-      bits.push(`<span class="${passed ? 'late' : ''}">${esc(t.mins ? span(s0, s0 + t.mins) : clock(s0))}</span>`);
-      if (t.mins) bits.push(`<span>${esc(length(t.mins))}</span>`);
-    } else if (t.mins) bits.push(`<span>${ICON.clock}${esc(length(t.mins))}</span>`);
-    if (t.tag && TAGS[t.tag]) bits.push(`<span class="tag ${t.tag}">${TAGS[t.tag]}</span>`);
-    if (t.notes) bits.push(`<span class="has-note" aria-label="Has notes">${ICON.note}</span>`);
-    const busy = t.id.startsWith('tmp-');
+    const busy = t.id.startsWith('tmp-'), when = sec === 'overdue' || sec === 'upcoming';
+    const s0 = toMin(t.time);
+    const passed = sec === 'today' && !t.done && t.time && s0 + (t.mins || 0) <= nowMin();
+    let timeTxt = t.time ? `<span class="${passed ? 'late' : ''}">${esc(clock(s0))}</span>` : '<span class="none">—</span>';
+    if (when && t.date) timeTxt = `<span class="${sec === 'overdue' ? 'late' : 'day'}">${esc(shortDay(t.date))}</span>${t.time ? `<small>${esc(clock(s0))}</small>` : ''}`;
+    const timeCell = t.date && !t.done && !busy
+      ? `<label class="c-time" aria-label="Time for ${esc(t.title)}">${timeTxt}<input type="time" class="t-time" step="300" value="${esc(t.time || '')}"></label>`
+      : `<span class="c-time">${timeTxt}</span>`;
     return `<div class="trow${t.done ? ' done' : ''}${busy ? ' busy' : ''}" data-id="${esc(t.id)}">
       <button type="button" class="chk" data-act="done" role="checkbox" aria-checked="${t.done}" aria-label="${t.done ? 'Not done' : 'Done'}: ${esc(t.title)}"${busy ? ' disabled' : ''}>${ICON.check}</button>
-      <button type="button" class="tmain" data-act="open"${busy ? ' disabled' : ''}>
-        <span class="name">${esc(t.title)}</span>${bits.length ? `<span class="meta">${bits.join('')}</span>` : ''}
-      </button>
+      <button type="button" class="c-name" data-act="rename"${busy ? ' disabled' : ''}><span class="nm">${esc(t.title)}</span>${t.notes ? `<span class="has-note" aria-label="Has notes">${ICON.note}</span>` : ''}${t.tag === 'personal' ? '<i class="tdot personal" aria-label="Personal"></i>' : ''}</button>
+      ${timeCell}
+      <button type="button" class="c-len" data-act="open"${busy ? ' disabled' : ''} aria-label="Length">${t.mins ? esc(lenShort(t.mins)) : '<span class="none">—</span>'}</button>
+      <button type="button" class="c-more" data-act="open"${busy ? ' disabled' : ''} aria-label="Details for ${esc(t.title)}">${ICON2.more}</button>
     </div>`;
   }
   // a new task typed at the bottom of a section lands on that section's day
   const addRow = (sec, label) => `<form class="addrow" data-add="${sec}" autocomplete="off"><span class="plus">${ICON.plus}</span><input name="t" placeholder="New task" maxlength="200" enterkeyhint="done" aria-label="New task for ${label}"></form>`;
   function section(key, name, list, opts = {}) {
     const open = list.filter(t => !t.done).length;
-    const body = list.map(t => row(t, key)).join('') + (opts.extra || '') + (opts.add ? addRow(key, name) : '');
+    const rows = list.map(t => row(t, key)).join('') + (opts.extra || '');
+    const head = `<div class="thead" aria-hidden="true"><span></span><span>Task</span><span>${key === 'overdue' || key === 'upcoming' ? 'When' : 'Time'}</span><span>Length</span><span></span></div>`;
     return `<section class="sec sec-${key}" aria-label="${esc(name)}">
-      <div class="sec-h"><h2>${esc(name)}</h2>${opts.sub ? `<span class="sub">${esc(opts.sub)}</span>` : ''}<span class="n">${open || ''}</span></div>
-      ${body ? `<div class="list">${body}</div>` : ''}${opts.empty && !list.length ? `<p class="empty">${esc(opts.empty)}</p>` : ''}
+      <div class="sec-h"><h2>${esc(name)}</h2>${opts.sub ? `<span class="sub">${esc(opts.sub)}</span>` : ''}<span class="n">${open ? `${open} ${open === 1 ? 'task' : 'tasks'}` : ''}</span></div>
+      <div class="list">${head}${rows}${opts.add ? addRow(key, name) : ''}</div>
     </section>`;
   }
 
@@ -257,6 +271,41 @@
       ${section('tomorrow', 'Tomorrow', s.tomorrow, { add: true, sub: fmt(d1, { weekday: 'short', month: 'short', day: 'numeric' }) })}
       ${s.upcoming.length ? section('upcoming', 'Upcoming', s.upcoming) : ''}
       ${section('unsorted', 'Unsorted', s.unsorted, { add: true, sub: 'no day yet' })}`;
+  }
+
+  /* ---------- renaming a task right in the list ---------- */
+  function startRename(btn, t) {
+    const inp = document.createElement('input');
+    inp.className = 'c-name rename'; inp.value = t.title; inp.maxLength = 200; inp.enterKeyHint = 'done';
+    inp.dataset.id = t.id; inp.setAttribute('aria-label', 'Task name');
+    btn.replaceWith(inp);
+    inp.focus();
+    try { inp.setSelectionRange(inp.value.length, inp.value.length); } catch (e) {}
+  }
+  function endRename(inp, keep) {
+    const t = find(inp.dataset.id);
+    const v = inp.value.replace(/\s+/g, ' ').trim().slice(0, 200);
+    inp.dataset.done = '1';
+    if (t && keep && v && v !== t.title) {
+      const was = t.title;
+      t.title = v;
+      save(() => db.update(t.id, { title: v }), () => { t.title = was; });
+    } else render();
+  }
+
+  /* ---------- checking a task off asks first ---------- */
+  function askDone(t) {
+    S.edit = null; S.ask = t.id;
+    showSheet(`<div class="sheet-in" role="dialog" aria-modal="true" aria-label="Mark done"><div class="ask">
+      <b>Mark this task done?</b>
+      <p>${esc(t.title)}</p>
+      <div class="sh-foot"><button type="button" class="pill" data-act="close">Not yet</button><button type="button" class="pill solid" data-act="done-yes">Mark done</button></div>
+    </div></div>`);
+  }
+  function showSheet(html) {
+    const sh = $('#sheet'), scrim = $('#scrim');
+    sh.innerHTML = html; sh.hidden = false; scrim.hidden = false;
+    requestAnimationFrame(() => { sh.classList.add('open'); scrim.classList.add('open'); });
   }
 
   /* ---------- the sheet: one task's details ---------- */
@@ -341,7 +390,7 @@
     grow($('#ed_title'));
     if (focus && !S.edit.id) setTimeout(() => $('#ed_title') && $('#ed_title').focus(), 60);
   }
-  function closeSheet() { S.edit = null; S.confirmDel = false; drawSheet(); }
+  function closeSheet() { S.edit = null; S.ask = null; S.confirmDel = false; drawSheet(); }
   function grow(el) { if (!el) return; el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; }
   async function saveSheet() {
     const e = S.edit;
@@ -393,7 +442,7 @@
       <button type="submit" class="pill solid big" id="l_go">Sign in</button>
     </form></div>`;
   }
-  const typingIn = () => { const a = document.activeElement; return a && a.matches && a.matches('.addrow input') && a.value; };
+  const typingIn = () => { const a = document.activeElement; return a && a.matches && (a.matches('.rename') || (a.matches('.addrow input') && a.value)); };
   let pending = false;
   function render() {
     const v = $('#view');
@@ -428,7 +477,9 @@
       return;
     }
     const id = b.closest('[data-id]') && b.closest('[data-id]').dataset.id;
-    if (act === 'done') { const t = find(id); if (t) setDone(t, !t.done); }
+    if (act === 'done') { const t = find(id); if (t) { if (t.done) setDone(t, false); else askDone(t); } }
+    else if (act === 'done-yes') { const t = find(S.ask); closeSheet(); if (t && !t.done) setDone(t, true); }
+    else if (act === 'rename') { const t = find(id); if (t) startRename(b, t); }
     else if (act === 'open') { const t = find(id); if (t) openSheet(t); }
     else if (act === 'add') openSheet(null);
     else if (act === 'close') closeSheet();
@@ -446,7 +497,7 @@
         if (back && t.done) setDone(back, true);
       });
     }
-    else if (act === 'account') { S.edit = null; const sh = $('#sheet'); sh.innerHTML = vAccount(); sh.hidden = false; $('#scrim').hidden = false; requestAnimationFrame(() => { sh.classList.add('open'); $('#scrim').classList.add('open'); }); }
+    else if (act === 'account') { S.edit = null; showSheet(vAccount()); }
     else if (act === 'signout') { closeSheet(); if (sb) sb.auth.signOut(); }
     else if (act === 'undo') { const u = toastUndo; toastUndo = null; $('#toast').classList.remove('show'); if (u) u(); }
   });
@@ -462,6 +513,11 @@
     w.scrollTo({ top: (Math.round(w.scrollTop / ROW_H) + (e.key === 'ArrowDown' ? 1 : -1)) * ROW_H, behavior: 'smooth' });
   });
   document.addEventListener('change', e => {
+    if (e.target.classList && e.target.classList.contains('t-time')) {
+      const t = find(e.target.closest('[data-id]').dataset.id), v = e.target.value || null;
+      if (t && v !== t.time) { const was = t.time; t.time = v; save(() => db.update(t.id, { at_time: v }), () => { t.time = was; }); }
+      return;
+    }
     if (!S.edit) return;
     if (e.target.id === 'ed_date') { S.edit.date = e.target.value || null; if (!S.edit.date) S.edit.time = null; drawSheet(); }
     if (e.target.id === 'ed_time') { S.edit.time = e.target.value || null; drawSheet(); }
@@ -469,7 +525,12 @@
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape' && $('#sheet').classList.contains('open')) { closeSheet(); return; }
     if (e.key === 'Enter' && e.target.id === 'ed_title') { e.preventDefault(); saveSheet(); }
+    if (e.target.classList && e.target.classList.contains('rename')) {
+      if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); }
+      else if (e.key === 'Escape') { e.target.value = (find(e.target.dataset.id) || {}).title || e.target.value; e.target.blur(); }
+    }
   });
+  document.addEventListener('focusout', e => { const r = e.target; if (r.classList && r.classList.contains('rename') && !r.dataset.done) setTimeout(() => endRename(r, true), 0); });
   document.addEventListener('focusout', e => { if (e.target.matches && e.target.matches('.addrow input')) setTimeout(() => { if (pending && !typingIn()) render(); }, 0); });
   document.addEventListener('submit', async e => {
     e.preventDefault();
@@ -623,7 +684,7 @@
   document.addEventListener('touchstart', e => {
     if (e.touches.length !== 1) { pressCancel(); return; }
     const el = e.target.closest('#view .trow');
-    if (!el) return;
+    if (!el || e.target.closest('.rename')) return;
     const p = e.touches[0];
     pressStart(el, p.clientX, p.clientY, false);
   }, { passive: true });
@@ -641,7 +702,7 @@
   document.addEventListener('mousedown', e => {
     if (e.button !== 0) return;
     const el = e.target.closest('#view .trow');
-    if (el) pressStart(el, e.clientX, e.clientY, true);
+    if (el && !e.target.closest('.rename')) pressStart(el, e.clientX, e.clientY, true);
   });
   document.addEventListener('mousemove', e => {
     if (DRAG && DRAG.mouse) { e.preventDefault(); place(e.clientY); return; }
