@@ -15,7 +15,12 @@
   const TABLE = 'tasks';
   const COLS = 'id,title,day,at_time,mins,done,done_at,notes,tag,pos,created_at,repeat,list,kind';
   const TAGS = { work: 'Work', personal: 'Personal' };
-  const LENGTHS = [15, 30, 45, 60, 90];
+  // length: two spin wheels, hours and minutes. A new task (or one with no length yet) starts at 0 hr 15 min;
+  // spin both to 0 for no length.
+  const HOURS = Array.from({ length: 13 }, (_, i) => i);    // 0–12
+  const MINS = Array.from({ length: 12 }, (_, i) => i * 5); // 0, 5 … 55
+  const DEFAULT_MINS = 15;
+  const ROW_H = 34;
 
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -261,8 +266,7 @@
     const tk = today(), tm = tomorrow();
     const which = !e.date ? 'none' : e.date === tk ? 'today' : e.date === tm ? 'tomorrow' : 'pick';
     const seg = (name, val, label, on) => `<button type="button" data-${name}="${val}" aria-pressed="${on}">${label}</button>`;
-    const lens = [[0, 'None'], ...LENGTHS.map(n => [n, length(n)])];
-    const custom = e.mins && !LENGTHS.includes(e.mins);
+    const [hi, mi] = wheelAt(e.mins);
     return `<div class="sheet-in" role="dialog" aria-modal="true" aria-label="${e.id ? 'Task' : 'New task'}">
       <form id="edForm" autocomplete="off">
         <div class="sh-top">
@@ -280,7 +284,10 @@
           ${e.date ? '' : '<small class="hint">Give it a day first.</small>'}
         </div>
         <div class="f"><span class="lab">Length</span>
-          <div class="chips" id="edLen">${lens.map(([n, l]) => `<button type="button" data-len="${n}" aria-pressed="${(e.mins || 0) === n}">${l}</button>`).join('')}<label class="chip-in${custom ? ' on' : ''}"><input type="number" id="ed_mins" min="1" max="1440" inputmode="numeric" placeholder="Other" value="${custom ? e.mins : ''}"><span>min</span></label></div>
+          <div class="wheels"><i class="wband" aria-hidden="true"></i>
+            <div class="wcol">${wheel('wh', HOURS, hi, 'Hours')}<span class="wu">hr</span></div>
+            <div class="wcol">${wheel('wm', MINS, mi, 'Minutes')}<span class="wu">min</span></div>
+          </div>
         </div>
         <div class="f"><span class="lab">Work or personal</span>
           <div class="seg" id="edTag">${seg('tag', '', 'Neither', !e.tag)}${seg('tag', 'work', 'Work', e.tag === 'work')}${seg('tag', 'personal', 'Personal', e.tag === 'personal')}</div>
@@ -292,9 +299,32 @@
       </form>
     </div>`;
   }
+  // where the wheels sit for a length in minutes (none yet: the 15-minute default)
+  function wheelAt(mins) {
+    if (mins == null) mins = DEFAULT_MINS;
+    let h = Math.floor(mins / 60), m = Math.round((mins % 60) / 5);
+    if (m === 12) { h++; m = 0; }
+    return [Math.min(h, HOURS.length - 1), m];
+  }
+  const wheel = (id, values, at, label) => `<div class="wheel" id="${id}" tabindex="0" role="listbox" aria-label="${label}">${values.map((v, i) => `<div class="wv${i === at ? ' on' : ''}" data-i="${i}" role="option" aria-selected="${i === at}">${v}</div>`).join('')}</div>`;
+  // reading the wheels: the row in the middle of each is what's picked
+  function readWheels() {
+    if (!S.edit) return;
+    const pick = (id, len) => { const w = $('#' + id); return w ? Math.max(0, Math.min(len - 1, Math.round(w.scrollTop / ROW_H))) : 0; };
+    const h = pick('wh', HOURS.length), m = pick('wm', MINS.length);
+    for (const [id, i] of [['wh', h], ['wm', m]]) $$(`#${id} .wv`).forEach(x => { const on = Number(x.dataset.i) === i; x.classList.toggle('on', on); x.setAttribute('aria-selected', String(on)); });
+    const total = HOURS[h] * 60 + MINS[m];
+    S.edit.mins = total || null;
+  }
+  function setWheels() {
+    const [hi, mi] = wheelAt(S.edit.mins);
+    const wh = $('#wh'), wm = $('#wm');
+    if (wh) wh.scrollTop = hi * ROW_H;
+    if (wm) wm.scrollTop = mi * ROW_H;
+  }
   function openSheet(t, defaults = {}) {
-    S.edit = t ? { id: t.id, title: t.title, date: t.date, time: t.time, mins: t.mins, tag: t.tag, notes: t.notes }
-      : { id: null, title: '', date: today(), time: null, mins: null, tag: null, notes: '', ...defaults };
+    S.edit = t ? { id: t.id, title: t.title, date: t.date, time: t.time, mins: t.mins ?? DEFAULT_MINS, tag: t.tag, notes: t.notes }
+      : { id: null, title: '', date: today(), time: null, mins: DEFAULT_MINS, tag: null, notes: '', ...defaults };
     S.confirmDel = false;
     drawSheet(true);
   }
@@ -306,6 +336,7 @@
     if (keep) { S.edit.title = keep.title; S.edit.notes = keep.notes; }
     sh.innerHTML = vSheet();
     sh.hidden = false; scrim.hidden = false;
+    setWheels();
     requestAnimationFrame(() => { sh.classList.add('open'); scrim.classList.add('open'); });
     grow($('#ed_title'));
     if (focus && !S.edit.id) setTimeout(() => $('#ed_title') && $('#ed_title').focus(), 60);
@@ -383,13 +414,14 @@
   /* ---------- events ---------- */
   document.addEventListener('click', e => {
     if (Date.now() < noClickUntil) { e.preventDefault(); e.stopPropagation(); return; }
-    const b = e.target.closest('[data-act], [data-day], [data-len], [data-tag]');
+    const wv = e.target.closest('.wheel .wv');
+    if (wv) { const w = wv.parentElement; w.scrollTo({ top: Number(wv.dataset.i) * ROW_H, behavior: 'smooth' }); return; }
+    const b = e.target.closest('[data-act], [data-day], [data-tag]');
     if (!b) return;
     const act = b.dataset.act;
     if (b.closest('#edForm') && !act) {
       const ed = S.edit;
       if (b.dataset.day) ed.date = b.dataset.day === 'today' ? today() : b.dataset.day === 'tomorrow' ? tomorrow() : null;
-      else if (b.dataset.len != null) ed.mins = Number(b.dataset.len) || null;
       else if (b.dataset.tag != null) ed.tag = b.dataset.tag || null;
       if (!ed.date) ed.time = null;
       drawSheet();
@@ -421,7 +453,13 @@
   $('#scrim').addEventListener('click', closeSheet);
   document.addEventListener('input', e => {
     if (e.target.id === 'ed_title') grow(e.target);
-    if (e.target.id === 'ed_mins') { const n = Math.round(Number(e.target.value)); S.edit.mins = n >= 1 && n <= 1440 ? n : null; $$('#edLen [data-len]').forEach(x => x.setAttribute('aria-pressed', String((S.edit.mins || 0) === Number(x.dataset.len)))); }
+  });
+  document.addEventListener('scroll', e => { if (e.target.classList && e.target.classList.contains('wheel')) readWheels(); }, true);
+  document.addEventListener('keydown', e => {
+    const w = e.target.classList && e.target.classList.contains('wheel') ? e.target : null;
+    if (!w || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+    e.preventDefault();
+    w.scrollTo({ top: (Math.round(w.scrollTop / ROW_H) + (e.key === 'ArrowDown' ? 1 : -1)) * ROW_H, behavior: 'smooth' });
   });
   document.addEventListener('change', e => {
     if (!S.edit) return;
@@ -443,7 +481,7 @@
       if (!title) return;
       input.value = '';
       const date = f.dataset.add === 'today' ? today() : f.dataset.add === 'tomorrow' ? tomorrow() : null;
-      addTask({ title: title.slice(0, 200), date });
+      addTask({ title: title.slice(0, 200), date, mins: DEFAULT_MINS });
       return;
     }
     if (f.id !== 'loginForm') return;
