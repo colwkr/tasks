@@ -151,3 +151,16 @@ input:focus, textarea:focus { border-color: var(--line-2); }
 .login .f input { width: 100%; }
 .login .pill { margin-top: 20px; }
 .err { color: #ff8a7e; margin: 12px 0 0; font-size: 14px; }
+
+/* ---------- no text selecting or copy menu: holding a task lifts it instead ---------- */
+body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+input, textarea { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
+
+/* ---------- holding and moving a task ---------- */
+.trow { transition: background .25s; }
+.trow.pressing { background: var(--panel-2); }
+.trow.lifted { position: fixed; z-index: 40; margin: 0; background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 14px; box-shadow: 0 16px 40px rgba(0, 0, 0, .6); transform: scale(1.03); pointer-events: none; transition: transform .12s, box-shadow .12s; }
+.ph { border-top: 1px solid var(--line); background: color-mix(in srgb, var(--accent) 9%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent); }
+.list > .ph:first-child { border-top: 0; }
+.list.drop { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+body.dragging, body.dragging * { cursor: grabbing !important; }

@@ -169,9 +169,11 @@
   }
 
   /* ---------- the list ---------- */
-  const byOrder = (a, b) => (a.pos != null && b.pos != null && a.pos !== b.pos ? a.pos - b.pos : 0) || a.created - b.created;
-  // within one day: tasks with a time, in time order, then the ones without
-  const inDay = (a, b) => (a.time ? 0 : 1) - (b.time ? 0 : 1) || (a.time || '').localeCompare(b.time || '') || byOrder(a, b);
+  // the order you held and moved tasks into comes first; tasks never moved keep the usual order after them
+  const manual = (a, b) => (a.pos != null && b.pos != null ? a.pos - b.pos : a.pos != null ? -1 : b.pos != null ? 1 : 0);
+  const byOrder = (a, b) => manual(a, b) || a.created - b.created;
+  // within one day: as you moved them; otherwise tasks with a time, in time order, then the ones without
+  const inDay = (a, b) => manual(a, b) || (a.time ? 0 : 1) - (b.time ? 0 : 1) || (a.time || '').localeCompare(b.time || '') || a.created - b.created;
   const byDate = (a, b) => a.date.localeCompare(b.date) || inDay(a, b);
   function sections() {
     const tk = today(), tm = tomorrow(), start = dayStart();
@@ -367,7 +369,7 @@
     if (!S.ready) { v.innerHTML = ''; return; }
     if (!S.user) { v.innerHTML = vLogin(); $('#fab').hidden = true; return; }
     // don't redraw under someone typing a new task; draw once they're done
-    if (typingIn()) { pending = true; return; }
+    if (typingIn() || DRAG) { pending = true; return; }
     pending = false;
     S.day = today();
     $('#fab').hidden = false;
@@ -380,6 +382,7 @@
 
   /* ---------- events ---------- */
   document.addEventListener('click', e => {
+    if (Date.now() < noClickUntil) { e.preventDefault(); e.stopPropagation(); return; }
     const b = e.target.closest('[data-act], [data-day], [data-len], [data-tag]');
     if (!b) return;
     const act = b.dataset.act;
@@ -454,6 +457,159 @@
   // at midnight, tomorrow becomes today and today's unfinished tasks move up to Overdue
   setInterval(() => { if (S.user && (S.day !== today() || $('.trow .late'))) render(); }, 30000);
   setInterval(() => { if (S.user && S.day !== today()) render(); }, 5000);
+
+  /* ---------- hold a task to lift it, then move it ----------
+     Hold a finger on a task (or press and drag with a mouse) and it lifts off the list. Drop it:
+       in the same section  to put it in a new place in the order
+       in Today, Tomorrow   to move it to that day (keeping its time), in the spot you dropped it
+       in Unsorted          to take its day (and time) off
+       in Upcoming          to give it the day of the task you dropped it next to
+     Overdue only gives tasks up: nothing can be moved into the past. */
+  const HOLD_MS = 380, SLOP = 9;
+  let DRAG = null, press = null, noClickUntil = 0;
+  const DROP = ['today', 'tomorrow', 'upcoming', 'unsorted'];
+  const secOf = el => { const s = el && el.closest('section.sec'); return s ? [...s.classList].find(c => c.startsWith('sec-')).slice(4) : null; };
+  const buzz = () => { try { navigator.vibrate && navigator.vibrate(12); } catch (e) {} };
+
+  function pressStart(el, x, y, mouse) {
+    if (!el || el.classList.contains('done') || el.classList.contains('busy') || S.edit) return;
+    press = { el, x, y, mouse, timer: setTimeout(() => lift(x, y), mouse ? 400 : HOLD_MS) };
+    if (!mouse) el.classList.add('pressing');
+  }
+  function pressCancel() {
+    if (!press) return;
+    clearTimeout(press.timer); press.el.classList.remove('pressing'); press = null;
+  }
+  function lift(x, y) {
+    if (!press) return;
+    const el = press.el, r = el.getBoundingClientRect();
+    clearTimeout(press.timer); el.classList.remove('pressing');
+    const ph = document.createElement('div');
+    ph.className = 'ph'; ph.style.height = r.height + 'px';
+    el.after(ph);
+    DRAG = { el, ph, id: el.dataset.id, from: secOf(el), grab: y - r.top, y, mouse: press.mouse, raf: 0 };
+    press = null;
+    Object.assign(el.style, { left: r.left + 'px', top: r.top + 'px', width: r.width + 'px' });
+    el.classList.add('lifted');
+    document.body.classList.add('dragging');
+    buzz();
+    place(y);
+    autoScroll();
+  }
+  // the gap follows the finger: into the nearest list it can go in, between the tasks it's over
+  function place(y) {
+    const d = DRAG;
+    d.y = y;
+    d.el.style.top = (y - d.grab) + 'px';
+    const lists = DROP.map(k => $(`.sec-${k} .list`)).filter(Boolean);
+    let best = null, bestD = Infinity;
+    for (const l of lists) {
+      const r = l.getBoundingClientRect();
+      const dist = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+      if (dist < bestD) { bestD = dist; best = l; }
+    }
+    if (!best) return;
+    const rows = $$(':scope > .trow:not(.done):not(.lifted)', best);
+    const before = rows.find(x => { const b = x.getBoundingClientRect(); return y < b.top + b.height / 2; });
+    const tail = $(':scope > .trow.done, :scope > .addrow', best);
+    if (before) { if (d.ph.nextSibling !== before) before.before(d.ph); }
+    else if (tail) { if (d.ph.nextSibling !== tail) tail.before(d.ph); }
+    else if (d.ph.parentElement !== best || d.ph.nextSibling) best.append(d.ph);
+    $$('.list.drop').forEach(l => l !== best && l.classList.remove('drop'));
+    best.classList.add('drop');
+  }
+  // near the top or bottom of the screen, the page scrolls so a task can travel the whole list
+  function autoScroll() {
+    const d = DRAG;
+    if (!d) return;
+    const edge = 90, h = innerHeight, top = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sat')) || 0;
+    let v = 0;
+    if (d.y < top + edge) v = -Math.ceil((top + edge - d.y) / 6);
+    else if (d.y > h - edge) v = Math.ceil((d.y - (h - edge)) / 6);
+    if (v) { const was = scrollY; scrollBy(0, v); if (scrollY !== was) place(d.y); }
+    d.raf = requestAnimationFrame(autoScroll);
+  }
+  function dropIt() {
+    const d = DRAG;
+    if (!d) return;
+    cancelAnimationFrame(d.raf);
+    const to = secOf(d.ph);
+    const list = d.ph.parentElement;
+    const order = list ? $$(':scope > .trow:not(.done), :scope > .ph', list).filter(x => x !== d.el) : [];
+    const at = order.indexOf(d.ph);
+    const prev = at > 0 ? order[at - 1] : null, next = order[at + 1] || null;
+    d.ph.remove();
+    d.el.classList.remove('lifted'); d.el.removeAttribute('style');
+    document.body.classList.remove('dragging');
+    $$('.list.drop').forEach(l => l.classList.remove('drop'));
+    DRAG = null;
+    noClickUntil = Date.now() + 450;
+    const t = find(d.id);
+    if (t && to) moveTo(t, to, order.filter(x => x !== d.ph).map(x => x.dataset.id), at, prev, next);
+    render();
+  }
+  function moveTo(t, to, ids, at, prev, next) {
+    const patch = {};
+    if (to === 'upcoming') {
+      const nb = prev || next, near = nb ? find(nb.dataset.id) : null;
+      if (!near || !near.date || near.date === t.date) return;
+      patch.date = near.date;
+      if (t.pos != null) patch.pos = null;
+    } else {
+      const date = to === 'today' ? today() : to === 'tomorrow' ? tomorrow() : null;
+      if (date !== t.date) { patch.date = date; if (!date) patch.time = null; }
+      // number the section in its new order, so it stays the way you left it
+      const list = ids.map(find).filter(Boolean);
+      list.splice(Math.max(0, Math.min(at, list.length)), 0, t);
+      list.forEach((x, i) => {
+        if (x === t) { if (x.pos !== i + 1) patch.pos = i + 1; return; }
+        if (x.pos !== i + 1) { const was = x.pos; x.pos = i + 1; save(() => db.update(x.id, { pos: i + 1 }), () => { x.pos = was; }); }
+      });
+    }
+    if (!Object.keys(patch).length) return;
+    const before = { date: t.date, time: t.time, pos: t.pos };
+    Object.assign(t, patch);
+    const row = toRow(patch);
+    if ('pos' in patch) row.pos = patch.pos;
+    save(() => db.update(t.id, row), () => Object.assign(t, before));
+    if ('date' in patch) toast(`Moved to ${patch.date ? dayName(patch.date) : 'Unsorted'}: ${t.title}`);
+  }
+  function dragEnd() {
+    if (press) { pressCancel(); return; }
+    if (!DRAG) return;
+    dropIt();
+    if (pending) render();
+  }
+
+  // touch: hold still to lift; moving first is a scroll, so it never lifts
+  document.addEventListener('touchstart', e => {
+    if (e.touches.length !== 1) { pressCancel(); return; }
+    const el = e.target.closest('#view .trow');
+    if (!el) return;
+    const p = e.touches[0];
+    pressStart(el, p.clientX, p.clientY, false);
+  }, { passive: true });
+  document.addEventListener('touchmove', e => {
+    const p = e.touches[0];
+    if (DRAG) { e.preventDefault(); place(p.clientY); return; }
+    if (press && (Math.abs(p.clientX - press.x) > SLOP || Math.abs(p.clientY - press.y) > SLOP)) pressCancel();
+  }, { passive: false });
+  document.addEventListener('touchend', dragEnd);
+  document.addEventListener('touchcancel', dragEnd);
+  // the phone's own long-press menu (copy, look up...) would fight the lift
+  document.addEventListener('contextmenu', e => { if (e.target.closest('#view .trow')) e.preventDefault(); });
+
+  // mouse: press and drag (or hold) to lift
+  document.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    const el = e.target.closest('#view .trow');
+    if (el) pressStart(el, e.clientX, e.clientY, true);
+  });
+  document.addEventListener('mousemove', e => {
+    if (DRAG && DRAG.mouse) { e.preventDefault(); place(e.clientY); return; }
+    if (press && press.mouse && (Math.abs(e.clientX - press.x) > 5 || Math.abs(e.clientY - press.y) > 5)) lift(e.clientX, e.clientY);
+  });
+  document.addEventListener('mouseup', () => { if ((press && press.mouse) || (DRAG && DRAG.mouse)) dragEnd(); });
 
   /* ---------- start ---------- */
   if (DEMO) {
